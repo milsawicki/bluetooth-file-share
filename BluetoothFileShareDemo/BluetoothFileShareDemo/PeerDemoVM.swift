@@ -7,6 +7,14 @@ final class PeerDemoVM: ObservableObject {
     @Published var receivedFiles: [URL] = []
     @Published var connectedPeers: [MCPeerID] = []
     @Published var lastReceivedURL: URL? // NEW
+    @Published var incomingInvitation: IncomingInvitation?
+
+    struct IncomingInvitation: Identifiable {
+        let id = UUID()
+        let peer: MCPeerID
+        let fileName: String?
+        let respond: (Bool) -> Void
+    }
 
     func start() {
         let mgr = PeerShareManager.shared
@@ -26,6 +34,28 @@ final class PeerDemoVM: ObservableObject {
                 self?.lastReceivedURL = dst
             }
         }
+
+        mgr.onInvitation = { [weak self] peer, context, respond in
+            let fileName = Self.fileName(from: context)
+            DispatchQueue.main.async {
+                self?.incomingInvitation = IncomingInvitation(peer: peer, fileName: fileName, respond: respond)
+            }
+        }
+    }
+
+    func respond(to invitation: IncomingInvitation, accept: Bool) {
+        invitation.respond(accept)
+        DispatchQueue.main.async {
+            self.incomingInvitation = nil
+        }
+    }
+
+    private static func fileName(from context: Data?) -> String? {
+        guard
+            let context,
+            let obj = try? JSONSerialization.jsonObject(with: context) as? [String: Any]
+        else { return nil }
+        return obj["name"] as? String
     }
 }
 

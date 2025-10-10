@@ -56,6 +56,18 @@ struct ContentView: View {
             .padding()
             .navigationTitle("mSzafir File Share - demo 📨")
         }
+        .alert(item: $vm.incomingInvitation) { invitation in
+            Alert(
+                title: Text("\(invitation.peer.displayName) chce wysłać plik"),
+                message: Text(invitation.fileName ?? "Potwierdź, aby przyjąć połączenie."),
+                primaryButton: .default(Text("Akceptuj")) {
+                    vm.respond(to: invitation, accept: true)
+                },
+                secondaryButton: .cancel(Text("Odrzuć")) {
+                    vm.respond(to: invitation, accept: false)
+                }
+            )
+        }
         .onReceive(vm.$lastReceivedURL.compactMap { $0 }) { url in
             toSaveURL = url
             askToSave = true

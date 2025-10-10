@@ -24,6 +24,7 @@ public final class PeerShareManager: NSObject {
     public var onReceiveFile: ((URL, String, MCPeerID) -> Void)?
     public var onProgress: ((Progress, String, MCPeerID) -> Void)?
     public var onStateChange: ((MCPeerID, MCSessionState) -> Void)?
+    public var onInvitation: ((MCPeerID, Data?, @escaping (Bool) -> Void) -> Void)?
     public var onFoundPeer: ((MCPeerID) -> Void)?
     public var onLostPeer: ((MCPeerID) -> Void)?
 
@@ -51,7 +52,7 @@ public final class PeerShareManager: NSObject {
             return send(file: url, to: peer, name: name, completion: completion)
         }
         pending[peer] = (url, name, completion)
-        invite(peer, timeout: timeout)
+        invite(peer, context: invitationContext(for: url, name: name), timeout: timeout)
         return nil
     }
 
@@ -70,8 +71,8 @@ public final class PeerShareManager: NSObject {
                                         userInfo: [NSLocalizedDescriptionKey: "Peer disconnected"]))
         }
     }
-    public func invite(_ peer: MCPeerID, timeout: TimeInterval = 15) {
-        browser.invitePeer(peer, to: session, withContext: nil, timeout: timeout)
+    public func invite(_ peer: MCPeerID, context: Data? = nil, timeout: TimeInterval = 15) {
+        browser.invitePeer(peer, to: session, withContext: context, timeout: timeout)
     }
 
     @discardableResult
@@ -79,6 +80,11 @@ public final class PeerShareManager: NSObject {
         return session.sendResource(at: url, withName: name ?? url.lastPathComponent, toPeer: peer) { err in
             completion?(err)
         }
+    }
+
+    private func invitationContext(for url: URL, name: String?) -> Data? {
+        let info = ["name": name ?? url.lastPathComponent]
+        return try? JSONSerialization.data(withJSONObject: info, options: [])
     }
 }
 
@@ -95,7 +101,24 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
 
     // Advertiser (accept; auto-accept here – expose UI higher to ask user)
     public func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        invitationHandler(true, session)
+        if let onInvitation {
+            var responded = false
+            let responder: (Bool) -> Void = { [weak self] accept in
+                guard let self, !responded else { return }
+                responded = true
+                if accept {
+                    invitationHandler(true, self.session)
+                } else {
+                    invitationHandler(false, nil)
+                    self.session.cancelConnectPeer(peerID)
+                }
+            }
+            DispatchQueue.main.async {
+                onInvitation(peerID, context, responder)
+            }
+        } else {
+            invitationHandler(true, session)
+        }
     }
     public func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) { print("Advertiser error:", error) }
 
