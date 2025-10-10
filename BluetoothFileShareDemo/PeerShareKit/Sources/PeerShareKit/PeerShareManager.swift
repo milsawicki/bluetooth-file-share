@@ -8,6 +8,8 @@ public final class PeerShareManager: NSObject {
 
     public let serviceType: String = "psk-share" // ≤ 15 chars, a–z0–9
     public let myPeerID = MCPeerID(displayName: UIDevice.current.name)
+    private var pendingSends: [MCPeerID: (url: URL, completion: ((Error?) -> Void)?)] = [:]
+    private var pending: [MCPeerID: (url: URL, name: String?, completion: ((Error?) -> Void)?)] = [:]
 
     public private(set) lazy var session: MCSession = {
         let s = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
@@ -39,7 +41,35 @@ public final class PeerShareManager: NSObject {
         browser.stopBrowsingForPeers()
         session.disconnect()
     }
+    @discardableResult
+    public func connectAndSend(file url: URL,
+                               to peer: MCPeerID,
+                               name: String? = nil,
+                               timeout: TimeInterval = 15,
+                               completion: ((Error?) -> Void)? = nil) -> Progress? {
+        if session.connectedPeers.contains(peer) {
+            return send(file: url, to: peer, name: name, completion: completion)
+        }
+        pending[peer] = (url, name, completion)
+        invite(peer, timeout: timeout)
+        return nil
+    }
 
+
+    // wywołaj to w miejscu, gdzie już masz callback o zmianie stanu peer’a
+    // (np. session(_:peer:didChange:))
+    private func onPeerConnected(_ peerID: MCPeerID) {
+        if let pending = pendingSends.removeValue(forKey: peerID) {
+            _ = send(file: pending.url, to: peerID, completion: pending.completion)
+        }
+    }
+    
+    private func onPeerDisconnected(_ peerID: MCPeerID) {
+        if let pending = pendingSends.removeValue(forKey: peerID) {
+            pending.completion?(NSError(domain: "PeerShare", code: -2,
+                                        userInfo: [NSLocalizedDescriptionKey: "Peer disconnected"]))
+        }
+    }
     public func invite(_ peer: MCPeerID, timeout: TimeInterval = 15) {
         browser.invitePeer(peer, to: session, withContext: nil, timeout: timeout)
     }
@@ -72,6 +102,19 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
     // Session
     public func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         onStateChange?(peerID, state)
+        switch state {
+        case .connected:
+            if let p = pending.removeValue(forKey: peerID) {
+                _ = send(file: p.url, to: peerID, name: p.name, completion: p.completion)
+            }
+        case .notConnected:
+            if let p = pending.removeValue(forKey: peerID) {
+                p.completion?(NSError(domain: "PeerShare", code: -1,
+                                      userInfo: [NSLocalizedDescriptionKey: "Invitation declined or failed"]))
+            }
+        case .connecting: break
+        @unknown default: break
+        }
     }
     public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) { }
     public func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) { }

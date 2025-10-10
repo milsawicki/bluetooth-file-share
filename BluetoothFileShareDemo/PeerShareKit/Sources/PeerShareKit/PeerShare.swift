@@ -64,9 +64,11 @@ public struct PeerShareSheet: View {
         PeerPickerView { peer in
             selectedPeer = peer
             if let p = selectedPeer {
-                _ = PeerShareManager.shared.send(file: pdfURL, to: p)
+                let progress = PeerShareManager.shared.send(file: pdfURL, to: p)
                 dismiss()
+                return progress ?? Progress(totalUnitCount: 0)
             }
+            return  Progress(totalUnitCount: 0)
         }
     }
 }
