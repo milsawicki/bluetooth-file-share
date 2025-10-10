@@ -208,6 +208,23 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
             handleResponse(from: peerID, accepted: message.accepted ?? false)
         }
     }
+    public func session(_ session: MCSession,
+                        didReceive certificate: [Any]?,
+                        fromPeer peerID: MCPeerID,
+                        certificateHandler: @escaping (Bool) -> Void) {
+        guard session == self.session else {
+            certificateHandler(false)
+            return
+        }
+
+        // Requiring a certificate ensures the channel remains encrypted; decline if not provided.
+        guard let certificate, !certificate.isEmpty else {
+            certificateHandler(false)
+            return
+        }
+
+        certificateHandler(true)
+    }
     public func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) { }
     public func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
         onProgress?(progress, resourceName, peerID)
