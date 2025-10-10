@@ -1,6 +1,5 @@
 import Foundation
 import MultipeerConnectivity
-import UniformTypeIdentifiers
 import UIKit
 
 public final class PeerShareManager: NSObject {
@@ -8,8 +7,14 @@ public final class PeerShareManager: NSObject {
 
     public let serviceType: String = "psk-share" // ≤ 15 chars, a–z0–9
     public let myPeerID = MCPeerID(displayName: UIDevice.current.name)
-    private var pendingSends: [MCPeerID: (url: URL, completion: ((Error?) -> Void)?)] = [:]
-    private var pending: [MCPeerID: (url: URL, name: String?, completion: ((Error?) -> Void)?)] = [:]
+    private struct PendingSend {
+        let url: URL
+        let name: String?
+        let completion: ((Error?) -> Void)?
+    }
+
+    private var pendingRequests: [MCPeerID: PendingSend] = [:]
+    private var awaitingApproval: [MCPeerID: PendingSend] = [:]
 
     public private(set) lazy var session: MCSession = {
         let s = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
@@ -24,7 +29,7 @@ public final class PeerShareManager: NSObject {
     public var onReceiveFile: ((URL, String, MCPeerID) -> Void)?
     public var onProgress: ((Progress, String, MCPeerID) -> Void)?
     public var onStateChange: ((MCPeerID, MCSessionState) -> Void)?
-    public var onInvitation: ((MCPeerID, Data?, @escaping (Bool) -> Void) -> Void)?
+    public var onIncomingRequest: ((MCPeerID, String?, @escaping (Bool) -> Void) -> Void)?
     public var onFoundPeer: ((MCPeerID) -> Void)?
     public var onLostPeer: ((MCPeerID) -> Void)?
 
@@ -48,27 +53,32 @@ public final class PeerShareManager: NSObject {
                                name: String? = nil,
                                timeout: TimeInterval = 15,
                                completion: ((Error?) -> Void)? = nil) -> Progress? {
-        if session.connectedPeers.contains(peer) {
-            return send(file: url, to: peer, name: name, completion: completion)
+        let pending = PendingSend(url: url, name: name, completion: completion)
+
+        if pendingRequests[peer] != nil || awaitingApproval[peer] != nil {
+            completion?(NSError(domain: "PeerShare", code: -4,
+                                 userInfo: [NSLocalizedDescriptionKey: "Transfer already in progress"]))
+            return nil
         }
-        pending[peer] = (url, name, completion)
-        invite(peer, context: invitationContext(for: url, name: name), timeout: timeout)
+
+        if session.connectedPeers.contains(peer) {
+            requestApproval(for: pending, from: peer)
+            return nil
+        }
+
+        pendingRequests[peer] = pending
+        invite(peer, context: nil, timeout: timeout)
         return nil
     }
+    private func requestApproval(for pending: PendingSend, from peerID: MCPeerID) {
+        awaitingApproval[peerID] = pending
+        let fileName = pending.name ?? pending.url.lastPathComponent
 
-
-    // wywołaj to w miejscu, gdzie już masz callback o zmianie stanu peer’a
-    // (np. session(_:peer:didChange:))
-    private func onPeerConnected(_ peerID: MCPeerID) {
-        if let pending = pendingSends.removeValue(forKey: peerID) {
-            _ = send(file: pending.url, to: peerID, completion: pending.completion)
-        }
-    }
-    
-    private func onPeerDisconnected(_ peerID: MCPeerID) {
-        if let pending = pendingSends.removeValue(forKey: peerID) {
-            pending.completion?(NSError(domain: "PeerShare", code: -2,
-                                        userInfo: [NSLocalizedDescriptionKey: "Peer disconnected"]))
+        do {
+            try sendControlMessage(.requestSend(fileName: fileName), to: peerID)
+        } catch {
+            awaitingApproval.removeValue(forKey: peerID)
+            pending.completion?(error)
         }
     }
     public func invite(_ peer: MCPeerID, context: Data? = nil, timeout: TimeInterval = 15) {
@@ -82,9 +92,71 @@ public final class PeerShareManager: NSObject {
         }
     }
 
-    private func invitationContext(for url: URL, name: String?) -> Data? {
-        let info = ["name": name ?? url.lastPathComponent]
-        return try? JSONSerialization.data(withJSONObject: info, options: [])
+    private func sendControlMessage(_ message: ControlMessage, to peer: MCPeerID) throws {
+        let data = try JSONEncoder().encode(message)
+        try session.send(data, toPeers: [peer], with: .reliable)
+    }
+
+    private func handleIncomingRequest(from peer: MCPeerID, fileName: String?) {
+        guard let onIncomingRequest else {
+            do {
+                try sendControlMessage(.responseSend(accepted: true), to: peer)
+            } catch { }
+            return
+        }
+
+        var responded = false
+        let responder: (Bool) -> Void = { [weak self] accept in
+            guard let self, !responded else { return }
+            responded = true
+
+            do {
+                try self.sendControlMessage(.responseSend(accepted: accept), to: peer)
+            } catch {
+                if accept {
+                    self.awaitingApproval.removeValue(forKey: peer)
+                }
+            }
+
+            if !accept {
+                self.session.cancelConnectPeer(peer)
+            }
+        }
+
+        DispatchQueue.main.async {
+            onIncomingRequest(peer, fileName, responder)
+        }
+    }
+
+    private func handleResponse(from peer: MCPeerID, accepted: Bool) {
+        guard let pending = awaitingApproval.removeValue(forKey: peer) else { return }
+
+        if accepted {
+            _ = send(file: pending.url, to: peer, name: pending.name, completion: pending.completion)
+        } else {
+            pending.completion?(NSError(domain: "PeerShare", code: -3,
+                                       userInfo: [NSLocalizedDescriptionKey: "Remote peer declined file"]))
+            session.cancelConnectPeer(peer)
+        }
+    }
+}
+
+private struct ControlMessage: Codable {
+    enum Action: String, Codable {
+        case requestSend
+        case responseSend
+    }
+
+    let action: Action
+    let fileName: String?
+    let accepted: Bool?
+
+    static func requestSend(fileName: String?) -> ControlMessage {
+        ControlMessage(action: .requestSend, fileName: fileName, accepted: nil)
+    }
+
+    static func responseSend(accepted: Bool) -> ControlMessage {
+        ControlMessage(action: .responseSend, fileName: nil, accepted: accepted)
     }
 }
 
@@ -99,26 +171,9 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
 
     public func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) { print("Browser error:", error) }
 
-    // Advertiser (accept; auto-accept here – expose UI higher to ask user)
+    // Advertiser automatically accepts the session; approval happens via a custom message later.
     public func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        if let onInvitation {
-            var responded = false
-            let responder: (Bool) -> Void = { [weak self] accept in
-                guard let self, !responded else { return }
-                responded = true
-                if accept {
-                    invitationHandler(true, self.session)
-                } else {
-                    invitationHandler(false, nil)
-                    self.session.cancelConnectPeer(peerID)
-                }
-            }
-            DispatchQueue.main.async {
-                onInvitation(peerID, context, responder)
-            }
-        } else {
-            invitationHandler(true, session)
-        }
+        invitationHandler(true, session)
     }
     public func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) { print("Advertiser error:", error) }
 
@@ -127,19 +182,32 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
         onStateChange?(peerID, state)
         switch state {
         case .connected:
-            if let p = pending.removeValue(forKey: peerID) {
-                _ = send(file: p.url, to: peerID, name: p.name, completion: p.completion)
+            if let pending = pendingRequests.removeValue(forKey: peerID) {
+                requestApproval(for: pending, from: peerID)
             }
         case .notConnected:
-            if let p = pending.removeValue(forKey: peerID) {
+            if let p = pendingRequests.removeValue(forKey: peerID) {
                 p.completion?(NSError(domain: "PeerShare", code: -1,
                                       userInfo: [NSLocalizedDescriptionKey: "Invitation declined or failed"]))
+            }
+            if let awaiting = awaitingApproval.removeValue(forKey: peerID) {
+                awaiting.completion?(NSError(domain: "PeerShare", code: -2,
+                                             userInfo: [NSLocalizedDescriptionKey: "Peer disconnected"]))
             }
         case .connecting: break
         @unknown default: break
         }
     }
-    public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) { }
+    public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        guard let message = try? JSONDecoder().decode(ControlMessage.self, from: data) else { return }
+
+        switch message.action {
+        case .requestSend:
+            handleIncomingRequest(from: peerID, fileName: message.fileName)
+        case .responseSend:
+            handleResponse(from: peerID, accepted: message.accepted ?? false)
+        }
+    }
     public func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) { }
     public func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
         onProgress?(progress, resourceName, peerID)

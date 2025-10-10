@@ -7,9 +7,9 @@ final class PeerDemoVM: ObservableObject {
     @Published var receivedFiles: [URL] = []
     @Published var connectedPeers: [MCPeerID] = []
     @Published var lastReceivedURL: URL? // NEW
-    @Published var incomingInvitation: IncomingInvitation?
+    @Published var incomingRequest: IncomingRequest?
 
-    struct IncomingInvitation: Identifiable {
+    struct IncomingRequest: Identifiable {
         let id = UUID()
         let peer: MCPeerID
         let fileName: String?
@@ -35,27 +35,18 @@ final class PeerDemoVM: ObservableObject {
             }
         }
 
-        mgr.onInvitation = { [weak self] peer, context, respond in
-            let fileName = Self.fileName(from: context)
+        mgr.onIncomingRequest = { [weak self] peer, fileName, respond in
             DispatchQueue.main.async {
-                self?.incomingInvitation = IncomingInvitation(peer: peer, fileName: fileName, respond: respond)
+                self?.incomingRequest = IncomingRequest(peer: peer, fileName: fileName, respond: respond)
             }
         }
     }
 
-    func respond(to invitation: IncomingInvitation, accept: Bool) {
-        invitation.respond(accept)
+    func respond(to request: IncomingRequest, accept: Bool) {
+        request.respond(accept)
         DispatchQueue.main.async {
-            self.incomingInvitation = nil
+            self.incomingRequest = nil
         }
-    }
-
-    private static func fileName(from context: Data?) -> String? {
-        guard
-            let context,
-            let obj = try? JSONSerialization.jsonObject(with: context) as? [String: Any]
-        else { return nil }
-        return obj["name"] as? String
     }
 }
 

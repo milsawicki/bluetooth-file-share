@@ -56,15 +56,15 @@ struct ContentView: View {
             .padding()
             .navigationTitle("mSzafir File Share - demo 📨")
         }
-        .alert(item: $vm.incomingInvitation) { invitation in
+        .alert(item: $vm.incomingRequest) { request in
             Alert(
-                title: Text("\(invitation.peer.displayName) chce wysłać plik"),
-                message: Text(invitation.fileName ?? "Potwierdź, aby przyjąć połączenie."),
+                title: Text("\(request.peer.displayName) chce wysłać plik"),
+                message: Text(request.fileName ?? "Potwierdź, aby przyjąć połączenie."),
                 primaryButton: .default(Text("Akceptuj")) {
-                    vm.respond(to: invitation, accept: true)
+                    vm.respond(to: request, accept: true)
                 },
                 secondaryButton: .cancel(Text("Odrzuć")) {
-                    vm.respond(to: invitation, accept: false)
+                    vm.respond(to: request, accept: false)
                 }
             )
         }
