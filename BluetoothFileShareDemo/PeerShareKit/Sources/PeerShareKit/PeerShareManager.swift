@@ -2,7 +2,7 @@ import Foundation
 import MultipeerConnectivity
 import UIKit
 
-public final class PeerShareManager: NSObject {
+public final class PeerShareManager: NSObject, PeerShareManaging {
     public static let shared = PeerShareManager()
 
     public let serviceType: String = "psk-share" // ≤ 15 chars, a–z0–9
@@ -26,6 +26,8 @@ public final class PeerShareManager: NSObject {
     private lazy var browser   = MCNearbyServiceBrowser(peer: myPeerID, serviceType: serviceType)
 
     // MARK: Public API
+    public weak var delegate: PeerShareServiceDelegate?
+
     public var onReceiveFile: ((URL, String, MCPeerID) -> Void)?
     public var onProgress: ((Progress, String, MCPeerID) -> Void)?
     public var onStateChange: ((MCPeerID, MCSessionState) -> Void)?
@@ -98,7 +100,7 @@ public final class PeerShareManager: NSObject {
     }
 
     private func handleIncomingRequest(from peer: MCPeerID, fileName: String?) {
-        guard let onIncomingRequest else {
+        if onIncomingRequest == nil && delegate == nil {
             do {
                 try sendControlMessage(.responseSend(accepted: true), to: peer)
             } catch { }
@@ -123,8 +125,10 @@ public final class PeerShareManager: NSObject {
             }
         }
 
-        DispatchQueue.main.async {
-            onIncomingRequest(peer, fileName, responder)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.onIncomingRequest?(peer, fileName, responder)
+            self.delegate?.peerShareService(self, didReceiveSendRequestFrom: peer, fileName: fileName, respond: responder)
         }
     }
 
@@ -164,9 +168,11 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
 
     public func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         onFoundPeer?(peerID)
+        delegate?.peerShareService(self, found: peerID)
     }
     public func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         onLostPeer?(peerID)
+        delegate?.peerShareService(self, lost: peerID)
     }
 
     public func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) { print("Browser error:", error) }
@@ -180,6 +186,7 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
     // Session
     public func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         onStateChange?(peerID, state)
+        delegate?.peerShareService(self, didChange: state, for: peerID)
         switch state {
         case .connected:
             if let pending = pendingRequests.removeValue(forKey: peerID) {
@@ -228,9 +235,11 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
     public func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) { }
     public func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
         onProgress?(progress, resourceName, peerID)
+        delegate?.peerShareService(self, didStartReceiving: progress, resourceName: resourceName, from: peerID)
     }
     public func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {
         guard error == nil, let localURL else { return }
         onReceiveFile?(localURL, resourceName, peerID)
+        delegate?.peerShareService(self, didFinishReceivingFile: localURL, named: resourceName, from: peerID)
     }
 }
