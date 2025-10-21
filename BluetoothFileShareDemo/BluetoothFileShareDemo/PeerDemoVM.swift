@@ -18,34 +18,46 @@ final class PeerDemoVM: ObservableObject {
 
     func start() {
         let mgr = PeerShareManager.shared
+        mgr.delegate = self
         mgr.start()
-
-        mgr.onStateChange = { [weak self] _, _ in
-            DispatchQueue.main.async { self?.connectedPeers = mgr.session.connectedPeers }
-        }
-
-        mgr.onReceiveFile = { [weak self] tmpURL, name, _ in
-            let dst = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent(name)
-            try? FileManager.default.removeItem(at: dst)
-            try? FileManager.default.copyItem(at: tmpURL, to: dst)
-            DispatchQueue.main.async {
-                self?.receivedFiles.insert(dst, at: 0)
-                self?.lastReceivedURL = dst
-            }
-        }
-
-        mgr.onIncomingRequest = { [weak self] peer, fileName, respond in
-            DispatchQueue.main.async {
-                self?.incomingRequest = IncomingRequest(peer: peer, fileName: fileName, respond: respond)
-            }
-        }
     }
 
     func respond(to request: IncomingRequest, accept: Bool) {
         request.respond(accept)
         DispatchQueue.main.async {
             self.incomingRequest = nil
+        }
+    }
+}
+
+extension PeerDemoVM: PeerShareServiceDelegate {
+    func peerShareService(_ service: PeerShareManaging, didChange state: MCSessionState, for peer: MCPeerID) {
+        DispatchQueue.main.async {
+            self.connectedPeers = service.session.connectedPeers
+        }
+    }
+
+    func peerShareService(_ service: PeerShareManaging,
+                          didReceiveSendRequestFrom peer: MCPeerID,
+                          fileName: String?,
+                          respond: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async {
+            self.incomingRequest = IncomingRequest(peer: peer, fileName: fileName, respond: respond)
+        }
+    }
+
+    func peerShareService(_ service: PeerShareManaging,
+                          didFinishReceivingFile url: URL,
+                          named resourceName: String,
+                          from peer: MCPeerID) {
+        let dst = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(resourceName)
+        try? FileManager.default.removeItem(at: dst)
+        try? FileManager.default.copyItem(at: url, to: dst)
+
+        DispatchQueue.main.async {
+            self.receivedFiles.insert(dst, at: 0)
+            self.lastReceivedURL = dst
         }
     }
 }
