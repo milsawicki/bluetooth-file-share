@@ -3,11 +3,8 @@ import SwiftUI
 import Combine
 
 public struct PeerPickerView: View {
-    @State private var peers: [MCPeerID] = []
-    @State private var connected: [MCPeerID] = []
-    @State private var progressMap: [MCPeerID: Double] = [:]
+    @StateObject private var adapter = PeerPickerAdapter()
     @State private var sending: Set<MCPeerID> = []
-    @State private var cancellables: [MCPeerID: AnyCancellable] = [:]
     let manager = PeerShareManager.shared
     let onSelectPeer: (MCPeerID) -> Progress?
 
@@ -19,10 +16,10 @@ public struct PeerPickerView: View {
         NavigationView {
             List {
                 Section("Połączone") {
-                    ForEach(connected, id: \.self) { p in
+                    ForEach(adapter.connected, id: \.self) { p in
                         HStack {
                             Text("✅ \(p.displayName)")
-                            if let pr = progressMap[p] {
+                            if let pr = adapter.progressMap[p] {
                                 Spacer()
                                 Text(String(format: "%.0f%%", pr * 100))
                             }
@@ -30,7 +27,7 @@ public struct PeerPickerView: View {
                     }
                 }
                 Section("Urządzenia w pobliżu") {
-                    ForEach(peers, id: \.self) { p in
+                    ForEach(adapter.peers, id: \.self) { p in
                         HStack {
                             Text(p.displayName)
                             Spacer()
@@ -52,31 +49,58 @@ public struct PeerPickerView: View {
             .navigationTitle("Wybierz urządzenie")
         }
         .onAppear {
-            manager.onFoundPeer = { peer in
-                DispatchQueue.main.async {
-                    if !peers.contains(peer) { peers.append(peer) }
-                }
+            adapter.bind(to: manager)
+        }
+        .onDisappear {
+            adapter.unbind(from: manager)
+        }
+    }
+}
+
+private final class PeerPickerAdapter: ObservableObject, PeerShareSending {
+    @Published var peers: [MCPeerID] = []
+    @Published var connected: [MCPeerID] = []
+    @Published var progressMap: [MCPeerID: Double] = [:]
+    private weak var previousDelegate: PeerShareSending?
+
+    func bind(to manager: PeerShareManager) {
+        previousDelegate = manager.sendingDelegate
+        manager.sendingDelegate = self
+        connected = manager.session.connectedPeers
+        manager.start()
+    }
+
+    func unbind(from manager: PeerShareManager) {
+        if manager.sendingDelegate === self {
+            manager.sendingDelegate = previousDelegate
+        }
+        previousDelegate = nil
+    }
+
+    func peerShareManager(_ manager: PeerShareManager, didDiscover peer: MCPeerID) {
+        DispatchQueue.main.async {
+            if !self.peers.contains(peer) {
+                self.peers.append(peer)
             }
-            manager.onLostPeer = { peer in
-                DispatchQueue.main.async { peers.removeAll { $0 == peer } }
-            }
-            bind()
         }
     }
 
-    private func bind() {
-        // PeerPickerView.bind()
-        manager.onStateChange = { _, _ in
-            DispatchQueue.main.async {
-                connected = manager.session.connectedPeers
-            }
+    func peerShareManager(_ manager: PeerShareManager, didLose peer: MCPeerID) {
+        DispatchQueue.main.async {
+            self.peers.removeAll { $0 == peer }
+            self.progressMap.removeValue(forKey: peer)
         }
-        manager.onProgress = { progress, _, peer in
-            DispatchQueue.main.async {
-                progressMap[peer] = progress.fractionCompleted
-            }
-        }
-        manager.start()
+    }
 
+    func peerShareManager(_ manager: PeerShareManager, didChangeState state: MCSessionState, for peer: MCPeerID) {
+        DispatchQueue.main.async {
+            self.connected = manager.session.connectedPeers
+        }
+    }
+
+    func peerShareManager(_ manager: PeerShareManager, didUpdate progress: Progress, forFileNamed name: String, from peer: MCPeerID) {
+        DispatchQueue.main.async {
+            self.progressMap[peer] = progress.fractionCompleted
+        }
     }
 }
