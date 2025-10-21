@@ -33,6 +33,9 @@ public final class PeerShareManager: NSObject {
     public var onFoundPeer: ((MCPeerID) -> Void)?
     public var onLostPeer: ((MCPeerID) -> Void)?
 
+    public weak var receivingDelegate: PeerShareReceiving?
+    public weak var sendingDelegate: PeerShareSending?
+
     override private init() { super.init() }
 
     public func start() {
@@ -98,13 +101,6 @@ public final class PeerShareManager: NSObject {
     }
 
     private func handleIncomingRequest(from peer: MCPeerID, fileName: String?) {
-        guard let onIncomingRequest else {
-            do {
-                try sendControlMessage(.responseSend(accepted: true), to: peer)
-            } catch { }
-            return
-        }
-
         var responded = false
         let responder: (Bool) -> Void = { [weak self] accept in
             guard let self, !responded else { return }
@@ -123,8 +119,25 @@ public final class PeerShareManager: NSObject {
             }
         }
 
-        DispatchQueue.main.async {
-            onIncomingRequest(peer, fileName, responder)
+        var handledExternally = false
+
+        if let onIncomingRequest {
+            handledExternally = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                onIncomingRequest(peer, fileName, responder)
+                self.receivingDelegate?.peerShareManager(self, didReceiveIncomingRequestFrom: peer, fileName: fileName, respond: responder)
+            }
+        } else if let delegate = receivingDelegate {
+            handledExternally = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                delegate.peerShareManager(self, didReceiveIncomingRequestFrom: peer, fileName: fileName, respond: responder)
+            }
+        }
+
+        if !handledExternally {
+            responder(true)
         }
     }
 
@@ -164,9 +177,11 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
 
     public func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         onFoundPeer?(peerID)
+        sendingDelegate?.peerShareManager(self, didDiscover: peerID)
     }
     public func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         onLostPeer?(peerID)
+        sendingDelegate?.peerShareManager(self, didLose: peerID)
     }
 
     public func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) { print("Browser error:", error) }
@@ -180,6 +195,7 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
     // Session
     public func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         onStateChange?(peerID, state)
+        sendingDelegate?.peerShareManager(self, didChangeState: state, for: peerID)
         switch state {
         case .connected:
             if let pending = pendingRequests.removeValue(forKey: peerID) {
@@ -228,9 +244,11 @@ extension PeerShareManager: MCNearbyServiceBrowserDelegate, MCNearbyServiceAdver
     public func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) { }
     public func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
         onProgress?(progress, resourceName, peerID)
+        sendingDelegate?.peerShareManager(self, didUpdate: progress, forFileNamed: resourceName, from: peerID)
     }
     public func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {
         guard error == nil, let localURL else { return }
         onReceiveFile?(localURL, resourceName, peerID)
+        receivingDelegate?.peerShareManager(self, didReceiveFileAt: localURL, named: resourceName, from: peerID)
     }
 }
